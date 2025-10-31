@@ -1,0 +1,16 @@
+# .gitignore fayli
+
+# Botning maxfiy konfiguratsiya fayli
+.env
+
+# Python avtomatik yaratadigan katalog/fayllar
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual muhit katalogi
+venv/
+env/
+
+# Ma'lumotlar bazasi fayli
+bot_data.db
