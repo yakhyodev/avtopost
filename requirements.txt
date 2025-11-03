@@ -1,0 +1,6 @@
+# requirements.txt fayli
+
+aiogram
+python-dotenv
+APScheduler
+pytz
