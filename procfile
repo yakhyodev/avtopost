@@ -1,0 +1,3 @@
+# Procfile fayli (fayl kengaytmasiz yoziladi)
+
+web: python main.py
