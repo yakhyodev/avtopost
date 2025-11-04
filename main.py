@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime
-import pytz # pytz APScheduler uchun vaqt mintaqalarini boshqarish uchun kerak
+import pytz 
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -10,7 +10,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_ID
+# ADMIN_ID endi list bo'lgani uchun kod unga moslashtirildi
+from config import BOT_TOKEN, ADMIN_ID 
 from db import init_db, add_chat, get_active_chats, add_scheduled_post, deactivate_chat
 from scheduler import check_and_send_posts
 
@@ -29,10 +30,11 @@ class PostState(StatesGroup):
     waiting_for_post = State()
     waiting_for_schedule_time = State()
 
-# --- ADMIN TEKSHIRUVI ---
+# --- ADMIN TEKSHIRUVI (O'zgartirilgan) ---
 def is_admin(user_id: int) -> bool:
-    """Faqat ADMIN_ID uchun ruxsat beradi."""
-    return user_id == ADMIN_ID
+    """Faqat ADMIN_ID ro'yxatidagi foydalanuvchilar uchun ruxsat beradi."""
+    # Tekshiruv: user_id ro'yxatda mavjud bo'lsa True qaytaradi
+    return user_id in ADMIN_ID
 
 # --- HANDLERS (Buyruqlar va Xabarlar) ---
 
@@ -45,7 +47,7 @@ async def command_start_handler(message: types.Message):
 
 @dp.message(Command("myid"))
 async def command_myid(message: types.Message):
-    await message.answer(f"Sizning ID raqamingiz: `{message.from_user.id}`\n\n*(Uni Render Environment Variables ga `ADMIN_ID` sifatida saqlang)*", parse_mode="Markdown")
+    await message.answer(f"Sizning ID raqamingiz: `{message.from_user.id}`\n\n*(Uni Render Environment Variables yoki .env ga `ADMIN_ID` sifatida saqlang)*", parse_mode="Markdown")
 
 # --- 1. YANGI POST REJALASHTIRISH ---
 
@@ -85,7 +87,7 @@ async def process_post_content(message: types.Message, state: FSMContext):
     current_time_uz = datetime.now(pytz.timezone("Asia/Tashkent")).strftime('%Y-%m-%d %H:%M:%S')
 
     await message.answer(
-        f"Post qabul qilindi.\n\nEndi postni qachon yuborish vaqtini kiriting. **Format:** `YYYY-MM-DD HH:MM:SS` (masalan, 2025-11-01 15:30:00)\n\n*(Joriy Toshkent vaqti: {current_time_uz})*"
+        f"Post qabul qilindi.\n\nEndi postni qachon yuborish vaqtini kiriting. **Format:** `YYYY-MM-DD HH:MM:SS` (masalan, 2025-11-04 18:30:00)\n\n*(Joriy Toshkent vaqti: {current_time_uz})*"
     )
     await state.set_state(PostState.waiting_for_schedule_time)
 
@@ -127,6 +129,7 @@ async def process_schedule_time(message: types.Message, state: FSMContext):
 
 # --- 2. XIZMAT XABARLARI (KANALGA QO'SHILISH/O'CHIRILISH) ---
 
+# Botning xabarlarni yuborish huquqini tekshirish lozim.
 @dp.my_chat_member(F.chat.type.in_({'channel', 'supergroup', 'group'}))
 async def bot_added_to_chat(update: types.ChatMemberUpdated):
     """Bot kanal yoki guruhga administrator sifatida qo'shilganda/o'chirilganda ishlaydi."""
@@ -135,16 +138,16 @@ async def bot_added_to_chat(update: types.ChatMemberUpdated):
     
     # Yangi status: 'administrator' yoki 'member' (agar post yuborish huquqi bo'lsa)
     is_admin_or_member = update.new_chat_member.status in ['administrator', 'member']
-    can_post = getattr(update.new_chat_member, 'can_post_messages', False) or update.chat.type != 'channel' # Channel bo'lmasa can_post_messages default False bo'ladi, lekin guruhda xabar yuborish mumkin
+    can_post = getattr(update.new_chat_member, 'can_post_messages', False) or update.chat.type != 'channel' # Guruhda can_post_messages mavjud emas, shuning uchun 'or update.chat.type != 'channel'' qo'shildi
 
     if is_admin_or_member and (can_post or update.chat.type != 'channel'):
         # Chatni faol deb DB ga qo'shish/yangilash
         add_chat(chat_id, chat_title, update.chat.type)
         
-        # Adminni ogohlantirish
-        if update.old_chat_member.status in ['left', 'kicked', 'restricted']:
-             await bot.send_message(
-                ADMIN_ID, 
+        # Adminni ogohlantirish (faqat birinchi admin ID ga yuboriladi, ro'yxatning birinchi elementi)
+        if ADMIN_ID and update.old_chat_member.status in ['left', 'kicked', 'restricted']:
+            await bot.send_message(
+                ADMIN_ID[0], 
                 f"✅ **Bot yangi chatga qo'shildi/faollashdi:**\nChat: **{chat_title}**\nID: `{chat_id}`", 
                 parse_mode="Markdown"
             )
@@ -154,18 +157,25 @@ async def bot_added_to_chat(update: types.ChatMemberUpdated):
         # Chatni nofaol deb belgilash
         deactivate_chat(chat_id)
         
-        # Adminni ogohlantirish
-        await bot.send_message(
-            ADMIN_ID, 
-            f"❌ **Bot chatdan chiqarildi/bloklandi:**\nChat: **{chat_title}**\nID: `{chat_id}`. Endi unga postlar yuborilmaydi.",
-            parse_mode="Markdown"
-        )
+        # Adminni ogohlantirish (faqat birinchi admin ID ga yuboriladi)
+        if ADMIN_ID:
+            await bot.send_message(
+                ADMIN_ID[0], 
+                f"❌ **Bot chatdan chiqarildi/bloklandi:**\nChat: **{chat_title}**\nID: `{chat_id}`. Endi unga postlar yuborilmaydi.",
+                parse_mode="Markdown"
+            )
 
 
 # --- BOTNI ISHGA TUSHIRISH FUNKSIYASI ---
 
 async def main():
     logger.info("Bot ishga tushirilmoqda...")
+    
+    # ADMIN_ID ro'yxati bo'sh emasligini tekshirish
+    if not BOT_TOKEN or not ADMIN_ID:
+        logger.error("BOT_TOKEN yoki ADMIN_ID (.env yoki Environment Variables) topilmadi. Bot ishga tushirilmadi.")
+        return # Botni ishga tushirishni to'xtatish
+
     # DB ni ishga tushirish
     init_db()
 
