@@ -1,12 +1,10 @@
-# db.py - PostgreSQL (psycopg2) ga moslangan versiya
+# db.py - PostgreSQL (psycopg2) ga moslangan yakuniy versiya
 
 import psycopg2
 import logging
-# datetime va pytz ni import qilish shart, chunki scheduled_posts bilan ishlaymiz
-from datetime import datetime
 import pytz 
+from datetime import datetime
 
-# config.py dan yangi DATABASE_URL ni import qilamiz
 from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
@@ -16,17 +14,39 @@ def get_db_connection():
     """PostgreSQL ga ulanishni yaratadi va qaytaradi."""
     if not DATABASE_URL:
         logger.error("DATABASE_URL konfiguratsiyada topilmadi.")
-        # Agar bu holat Renderda yuz bersa, bot ishga tushmaydi.
         raise ValueError("DATABASE_URL topilmadi. Iltimos, Render ENV yoki .env da o'rnating.")
     
     try:
-        # psycopg2 ulanish uchun to'g'ridan-to'g'ri DATABASE_URL manzilidan foydalanadi
         conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
         logger.error(f"PostgreSQL ulanishida xato: {e}")
         # Ulanish xatosi bo'lsa, xatoni ko'rsatish
         raise
+
+# --- DEBUG FUNKSIYALARI ---
+def debug_check_db_content():
+    """Jadvallardagi barcha ma'lumotlarni logga chiqaradi (DEBUG maqsadida)."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Target Chats ma'lumotlarini olish
+        cur.execute("SELECT id, title, is_active FROM target_chats;")
+        chats = cur.fetchall()
+        logger.info(f"DEBUG CHATS: Target Chats ({len(chats)}): {chats}")
+        
+        # Scheduled Posts ma'lumotlarini olish
+        cur.execute("SELECT id, schedule_time, is_sent FROM scheduled_posts;")
+        posts = cur.fetchall()
+        logger.info(f"DEBUG POSTS: Scheduled Posts ({len(posts)}): {posts}")
+        
+    except Exception as e:
+        logger.error(f"DEBUG XATO: DB tarkibini tekshirishda xato: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 # --- MA'LUMOTLAR BAZASINI INITSIIALIZATSIYA QILISH ---
 def init_db():
@@ -36,7 +56,7 @@ def init_db():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # 1. target_chats jadvali (Bot joylashgan kanallar/guruhlar)
+        # 1. target_chats jadvali
         cur.execute("""
             CREATE TABLE IF NOT EXISTS target_chats (
                 id BIGINT PRIMARY KEY,
@@ -46,7 +66,7 @@ def init_db():
             );
         """)
         
-        # 2. scheduled_posts jadvali (Rejalashtirilgan postlar)
+        # 2. scheduled_posts jadvali
         cur.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_posts (
                 id SERIAL PRIMARY KEY,
@@ -61,9 +81,11 @@ def init_db():
         conn.commit()
         logger.info("PostgreSQL jadvallari muvaffaqiyatli tekshirildi/yaratildi.")
         
+        # DB tarkibini tekshirish uchun DEBUG funksiyasini chaqirish
+        debug_check_db_content()
+        
     except Exception as e:
         logger.error(f"DB initsializatsiyasida xato: {e}")
-        # Baza yaratishda xato bo'lsa, xatoni ko'rsatish
         raise
     finally:
         if conn:
@@ -84,6 +106,7 @@ def add_chat(chat_id: int, title: str, chat_type: str):
             SET title = EXCLUDED.title, type = EXCLUDED.type, is_active = TRUE;
         """, (chat_id, title, chat_type))
         conn.commit()
+        logger.info(f"Chat {chat_id} muvaffaqiyatli qo'shildi/yangilandi.")
     except Exception as e:
         logger.error(f"Chatni qo'shish/yangilashda xato ({chat_id}): {e}")
     finally:
@@ -100,7 +123,6 @@ def get_active_chats():
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT id FROM target_chats WHERE is_active = TRUE;")
-        # psycopg2 int o'rniga Decimal tipini qaytarishi mumkin, shuning uchun int ga o'girish afzal
         chats = [int(row[0]) for row in cur.fetchall()]
     except Exception as e:
         logger.error(f"Faol chatlarni olishda xato: {e}")
@@ -109,7 +131,6 @@ def get_active_chats():
             conn.close()
     return chats
 
-from datetime import datetime
 def add_scheduled_post(media_type: str, file_id: str, caption: str, schedule_time: datetime) -> int:
     """Yangi postni rejalashtirish jadvaliga qo'shadi."""
     conn = None
@@ -117,10 +138,16 @@ def add_scheduled_post(media_type: str, file_id: str, caption: str, schedule_tim
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Vaqtni Toshkent vaqt zonasiga moslash
+        tz = pytz.timezone("Asia/Tashkent")
+        scheduled_time_tz = tz.localize(schedule_time)
+        
         cur.execute("""
             INSERT INTO scheduled_posts (media_type, file_id, caption, schedule_time) 
             VALUES (%s, %s, %s, %s) RETURNING id;
-        """, (media_type, file_id, caption, schedule_time))
+        """, (media_type, file_id, caption, scheduled_time_tz))
+        
         post_id = cur.fetchone()[0]
         conn.commit()
     except Exception as e:
@@ -148,11 +175,14 @@ def get_due_posts():
     """Yuborilishi kerak bo'lgan barcha postlarni qaytaradi."""
     conn = None
     posts = []
-    # TIMESTAMP WITH TIME ZONE ni to'g'ri solishtirish
+    
+    # Hozirgi vaqtni Toshkent vaqt zonasida olish
     now = datetime.now(pytz.timezone("Asia/Tashkent")) 
+    
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
         cur.execute("""
             SELECT id, media_type, file_id, caption 
             FROM scheduled_posts 
@@ -166,6 +196,10 @@ def get_due_posts():
                 'file_id': row[2],
                 'caption': row[3]
             })
+            
+        if posts:
+            logger.info(f"DEBUG: DB dan {len(posts)} ta yuborilishi kerak bo'lgan post topildi.")
+            
     except Exception as e:
         logger.error(f"Yuboriladigan postlarni olishda xato: {e}")
     finally:
