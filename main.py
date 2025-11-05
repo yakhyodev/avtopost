@@ -1,4 +1,4 @@
-# main.py fayli
+# main.py - Asosiy bot logikasi
 
 import logging
 from datetime import datetime
@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ADMIN_ID endi list bo'lgani uchun kod unga moslashtirildi
+# Importlar
 from config import BOT_TOKEN, ADMIN_ID 
 from db import init_db, add_chat, get_active_chats, add_scheduled_post, deactivate_chat
 from scheduler import check_and_send_posts
@@ -30,10 +30,9 @@ class PostState(StatesGroup):
     waiting_for_post = State()
     waiting_for_schedule_time = State()
 
-# --- ADMIN TEKSHIRUVI (O'zgartirilgan) ---
+# --- ADMIN TEKSHIRUVI ---
 def is_admin(user_id: int) -> bool:
     """Faqat ADMIN_ID ro'yxatidagi foydalanuvchilar uchun ruxsat beradi."""
-    # Tekshiruv: user_id ro'yxatda mavjud bo'lsa True qaytaradi
     return user_id in ADMIN_ID
 
 # --- HANDLERS (Buyruqlar va Xabarlar) ---
@@ -84,6 +83,7 @@ async def process_post_content(message: types.Message, state: FSMContext):
 
     await state.update_data(media_type=media_type, file_id=file_id, caption=caption)
     
+    # Kelajakdagi vaqtni kiriting deb foydalanuvchiga aytish uchun
     current_time_uz = datetime.now(pytz.timezone("Asia/Tashkent")).strftime('%Y-%m-%d %H:%M:%S')
 
     await message.answer(
@@ -100,7 +100,7 @@ async def process_schedule_time(message: types.Message, state: FSMContext):
         schedule_time_str = message.text.strip()
         schedule_time = datetime.strptime(schedule_time_str, '%Y-%m-%d %H:%M:%S')
         
-        # O'tmishdagi vaqtni tekshirish
+        # O'tmishdagi vaqtni tekshirish (Endi server vaqtidan foydalanish to'g'ri)
         if schedule_time < datetime.now():
             return await message.answer("Iltimos, kelajakdagi vaqtni kiriting. Vaqt o'tib ketgan.")
 
@@ -129,22 +129,22 @@ async def process_schedule_time(message: types.Message, state: FSMContext):
 
 # --- 2. XIZMAT XABARLARI (KANALGA QO'SHILISH/O'CHIRILISH) ---
 
-# Botning xabarlarni yuborish huquqini tekshirish lozim.
 @dp.my_chat_member(F.chat.type.in_({'channel', 'supergroup', 'group'}))
 async def bot_added_to_chat(update: types.ChatMemberUpdated):
     """Bot kanal yoki guruhga administrator sifatida qo'shilganda/o'chirilganda ishlaydi."""
     chat_id = update.chat.id
     chat_title = update.chat.title
     
-    # Yangi status: 'administrator' yoki 'member' (agar post yuborish huquqi bo'lsa)
-    is_admin_or_member = update.new_chat_member.status in ['administrator', 'member']
-    can_post = getattr(update.new_chat_member, 'can_post_messages', False) or update.chat.type != 'channel' # Guruhda can_post_messages mavjud emas, shuning uchun 'or update.chat.type != 'channel'' qo'shildi
+    # Yangi status: 'administrator' yoki 'member' (va post yuborish huquqi)
+    new_member = update.new_chat_member
+    is_admin_or_member = new_member.status in ['administrator', 'member']
+    can_post = getattr(new_member, 'can_post_messages', False) or update.chat.type != 'channel'
 
     if is_admin_or_member and (can_post or update.chat.type != 'channel'):
         # Chatni faol deb DB ga qo'shish/yangilash
         add_chat(chat_id, chat_title, update.chat.type)
         
-        # Adminni ogohlantirish (faqat birinchi admin ID ga yuboriladi, ro'yxatning birinchi elementi)
+        # Adminni ogohlantirish (faqat birinchi admin ID ga yuboriladi)
         if ADMIN_ID and update.old_chat_member.status in ['left', 'kicked', 'restricted']:
             await bot.send_message(
                 ADMIN_ID[0], 
@@ -153,11 +153,11 @@ async def bot_added_to_chat(update: types.ChatMemberUpdated):
             )
 
     # Bot o'chirilganda/bloklanganda
-    elif update.new_chat_member.status in ['left', 'kicked']:
+    elif new_member.status in ['left', 'kicked']:
         # Chatni nofaol deb belgilash
         deactivate_chat(chat_id)
         
-        # Adminni ogohlantirish (faqat birinchi admin ID ga yuboriladi)
+        # Adminni ogohlantirish
         if ADMIN_ID:
             await bot.send_message(
                 ADMIN_ID[0], 
@@ -166,34 +166,31 @@ async def bot_added_to_chat(update: types.ChatMemberUpdated):
             )
 
 
-# --- BOTNI ISHGA TUSHIRISH FUNKSIYASI ---
+# --- BOTNI ISHGA TUSHIRISH FUNKSIYASI (server.py tomonidan chaqiriladi) ---
 
 async def main():
+    """Botning asosiy ishga tushirish mantig'i."""
     logger.info("Bot ishga tushirilmoqda...")
     
     # ADMIN_ID ro'yxati bo'sh emasligini tekshirish
     if not BOT_TOKEN or not ADMIN_ID:
-        logger.error("BOT_TOKEN yoki ADMIN_ID (.env yoki Environment Variables) topilmadi. Bot ishga tushirilmadi.")
+        logger.error("BOT_TOKEN yoki ADMIN_ID topilmadi. Bot ishga tushirilmadi.")
         return # Botni ishga tushirishni to'xtatish
 
     # DB ni ishga tushirish
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"DB initsializatsiyasida jiddiy xato: {e}. Bot ishga tushirilmadi.")
+        return
 
     # Scheduler ni ishga tushirish (har 1 daqiqada postlarni tekshiradi)
     scheduler.add_job(check_and_send_posts, 'interval', minutes=1, args=(bot,))
     scheduler.start()
     logger.info("Scheduler ishga tushdi.")
 
-    # Botni ishga tushirish (bu funksiya tugamaydi)
+    # Botni ishga tushirish (Long Polling)
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
-    import asyncio
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot o'chirildi (KeyboardInterrupt yoki SystemExit).")
-        scheduler.shutdown()
-    except Exception as e:
-        logger.error(f"Asosiy xato: {e}")
-        scheduler.shutdown()
+# --- FAYLNING ENG OSTIDAGI QISM BUTUNLAY O'CHIRILDI ---
+# (server.py bu main funksiyasini chaqiradi)
