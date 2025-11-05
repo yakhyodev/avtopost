@@ -1,109 +1,188 @@
-# db.py fayli
+# db.py - PostgreSQL (psycopg2) ga moslangan versiya
 
-import sqlite3
+import psycopg2
+import logging
+# datetime va pytz ni import qilish shart, chunki scheduled_posts bilan ishlaymiz
 from datetime import datetime
-import os
+import pytz 
 
-# config.py dan kerakli sozlamalarni import qilamiz
-from config import DB_NAME
+# config.py dan yangi DATABASE_URL ni import qilamiz
+from config import DATABASE_URL
 
+logger = logging.getLogger(__name__)
+
+# --- BAZA BILAN ALOQA FUNKSIYASI ---
+def get_db_connection():
+    """PostgreSQL ga ulanishni yaratadi va qaytaradi."""
+    if not DATABASE_URL:
+        logger.error("DATABASE_URL konfiguratsiyada topilmadi.")
+        # Agar bu holat Renderda yuz bersa, bot ishga tushmaydi.
+        raise ValueError("DATABASE_URL topilmadi. Iltimos, Render ENV yoki .env da o'rnating.")
+    
+    try:
+        # psycopg2 ulanish uchun to'g'ridan-to'g'ri DATABASE_URL manzilidan foydalanadi
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        logger.error(f"PostgreSQL ulanishida xato: {e}")
+        # Ulanish xatosi bo'lsa, xatoni ko'rsatish
+        raise
+
+# --- MA'LUMOTLAR BAZASINI INITSIIALIZATSIYA QILISH ---
 def init_db():
-    """Ma'lumotlar bazasini va jadvallarni yaratadi."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    """Jadvallar mavjudligini tekshiradi va kerak bo'lsa ularni yaratadi."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 1. target_chats jadvali (Bot joylashgan kanallar/guruhlar)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS target_chats (
+                id BIGINT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                type VARCHAR(50),
+                is_active BOOLEAN DEFAULT TRUE
+            );
+        """)
+        
+        # 2. scheduled_posts jadvali (Rejalashtirilgan postlar)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id SERIAL PRIMARY KEY,
+                media_type VARCHAR(50) NOT NULL,
+                file_id TEXT,
+                caption TEXT,
+                schedule_time TIMESTAMP WITH TIME ZONE NOT NULL,
+                is_sent BOOLEAN DEFAULT FALSE
+            );
+        """)
+        
+        conn.commit()
+        logger.info("PostgreSQL jadvallari muvaffaqiyatli tekshirildi/yaratildi.")
+        
+    except Exception as e:
+        logger.error(f"DB initsializatsiyasida xato: {e}")
+        # Baza yaratishda xato bo'lsa, xatoni ko'rsatish
+        raise
+    finally:
+        if conn:
+            conn.close()
 
-    # 1. Target_Chats jadvali: Bot admin bo'lgan kanallar/guruhlar ro'yxati
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS target_chats (
-            chat_id INTEGER PRIMARY KEY,
-            chat_title TEXT,
-            chat_type TEXT,
-            is_active BOOLEAN DEFAULT 1
-        )
-    """)
+# --- CHATLARNI QO'SHISH/YANGILASH ---
+def add_chat(chat_id: int, title: str, chat_type: str):
+    """Chatni qo'shadi yoki faollashtiradi (agar allaqachon mavjud bo'lsa)."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # INSERT OR UPDATE (UPSERT)
+        cur.execute("""
+            INSERT INTO target_chats (id, title, type, is_active) 
+            VALUES (%s, %s, %s, TRUE)
+            ON CONFLICT (id) DO UPDATE 
+            SET title = EXCLUDED.title, type = EXCLUDED.type, is_active = TRUE;
+        """, (chat_id, title, chat_type))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Chatni qo'shish/yangilashda xato ({chat_id}): {e}")
+    finally:
+        if conn:
+            conn.close()
 
-    # 2. Scheduled_Posts jadvali: Rejalashtirilgan postlar
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS scheduled_posts (
-            post_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            media_type TEXT,
-            file_id TEXT,
-            caption TEXT,
-            scheduled_time DATETIME,
-            is_sent BOOLEAN DEFAULT 0
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-# --- TARGET_CHATS FUNKSIYALARI ---
-
-def add_chat(chat_id: int, chat_title: str, chat_type: str):
-    """Yangi chatni DB ga qo'shadi yoki faollashtiradi."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO target_chats (chat_id, chat_title, chat_type, is_active)
-        VALUES (?, ?, ?, 1)
-    """, (chat_id, chat_title, chat_type))
-    conn.commit()
-    conn.close()
-
-def deactivate_chat(chat_id: int):
-    """Chatni nofaol qiladi (bot o'chirilganda)."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE target_chats SET is_active = 0 WHERE chat_id = ?
-    """, (chat_id,))
-    conn.commit()
-    conn.close()
+# --- BOSHQA DB FUNKSIYALAR ---
 
 def get_active_chats():
-    """Faol chat ID'lari ro'yxatini qaytaradi."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT chat_id FROM target_chats WHERE is_active = 1")
-    chats = [row[0] for row in cursor.fetchall()]
-    conn.close()
+    """Barcha faol chat ID'larini qaytaradi."""
+    conn = None
+    chats = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM target_chats WHERE is_active = TRUE;")
+        # psycopg2 int o'rniga Decimal tipini qaytarishi mumkin, shuning uchun int ga o'girish afzal
+        chats = [int(row[0]) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Faol chatlarni olishda xato: {e}")
+    finally:
+        if conn:
+            conn.close()
     return chats
 
-# --- SCHEDULED_POSTS FUNKSIYALARI ---
-
-def add_scheduled_post(media_type: str, file_id: str, caption: str, schedule_time: datetime):
-    """Rejalashtirilgan postni DB ga saqlaydi."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO scheduled_posts (media_type, file_id, caption, scheduled_time)
-        VALUES (?, ?, ?, ?)
-    """, (media_type, file_id, caption, schedule_time.strftime('%Y-%m-%d %H:%M:%S')))
-    conn.commit()
-    post_id = cursor.lastrowid
-    conn.close()
+from datetime import datetime
+def add_scheduled_post(media_type: str, file_id: str, caption: str, schedule_time: datetime) -> int:
+    """Yangi postni rejalashtirish jadvaliga qo'shadi."""
+    conn = None
+    post_id = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO scheduled_posts (media_type, file_id, caption, schedule_time) 
+            VALUES (%s, %s, %s, %s) RETURNING id;
+        """, (media_type, file_id, caption, schedule_time))
+        post_id = cur.fetchone()[0]
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Postni rejalashtirishda xato: {e}")
+    finally:
+        if conn:
+            conn.close()
     return post_id
 
+def deactivate_chat(chat_id: int):
+    """Chatni nofaol deb belgilaydi."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE target_chats SET is_active = FALSE WHERE id = %s;", (chat_id,))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Chatni nofaol qilishda xato ({chat_id}): {e}")
+    finally:
+        if conn:
+            conn.close()
+
 def get_due_posts():
-    """Yuborish vaqti kelgan postlarni (yuborilmagan) qaytaradi."""
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT post_id, media_type, file_id, caption
-        FROM scheduled_posts
-        WHERE is_sent = 0 AND scheduled_time <= ?
-    """, (now,))
-    posts = cursor.fetchall()
-    conn.close()
+    """Yuborilishi kerak bo'lgan barcha postlarni qaytaradi."""
+    conn = None
+    posts = []
+    # TIMESTAMP WITH TIME ZONE ni to'g'ri solishtirish
+    now = datetime.now(pytz.timezone("Asia/Tashkent")) 
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, media_type, file_id, caption 
+            FROM scheduled_posts 
+            WHERE is_sent = FALSE AND schedule_time <= %s;
+        """, (now,))
+        
+        for row in cur.fetchall():
+            posts.append({
+                'id': row[0],
+                'media_type': row[1],
+                'file_id': row[2],
+                'caption': row[3]
+            })
+    except Exception as e:
+        logger.error(f"Yuboriladigan postlarni olishda xato: {e}")
+    finally:
+        if conn:
+            conn.close()
     return posts
 
 def mark_post_as_sent(post_id: int):
-    """Postni 'yuborilgan' deb belgilaydi."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE scheduled_posts SET is_sent = 1 WHERE post_id = ?
-    """, (post_id,))
-    conn.commit()
-    conn.close()
+    """Postni yuborilgan deb belgilaydi."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE scheduled_posts SET is_sent = TRUE WHERE id = %s;", (post_id,))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Postni yuborilgan deb belgilashda xato ({post_id}): {e}")
+    finally:
+        if conn:
+            conn.close()
